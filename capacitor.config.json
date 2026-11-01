@@ -1,0 +1,13 @@
+{
+  "appId": "com.novastream.vault",
+  "appName": "NovaVault",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "PrivacyScreen": {
+      "enable": true
+    }
+  }
+}
