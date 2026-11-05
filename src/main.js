@@ -7,7 +7,7 @@ import * as Auth from './auth.js';
 /* ───────── helpers ───────── */
 const $ = (s, r = document) => r.querySelector(s);
 const root = $('#app');
-const esc = (t) => { const d = document.createElement('div'); d.textContent = t ?? ''; return d.innerHTML; };
+const esc = (t) => { const d = document.createElement('div'); d.textContent = t ?? ''; return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
 const fmtSize = (b) => (b >= 1e9 ? (b / 1e9).toFixed(2) + ' GB' : (b / 1e6).toFixed(1) + ' MB');
 const fmtDur = (s) => { if (!s) return ''; const m = Math.floor(s / 60); return `${m}:${String(Math.floor(s % 60)).padStart(2, '0')}`; };
 
@@ -26,7 +26,9 @@ const P = {
   finger: 'M12 11v4M8 21c0-3 .5-5 .5-8a3.5 3.5 0 0 1 7 0c0 3 .5 5 .5 8M5 12a7 7 0 0 1 14 0M4 17c.5-1 1-2.5 1-5',
   back: 'M15 18l-6-6 6-6',
   next: 'M9 18l6-6-6-6',
-  bksp: 'M21 5H9l-6 7 6 7h12zM17 9l-6 6M11 9l6 6'
+  bksp: 'M21 5H9l-6 7 6 7h12zM17 9l-6 6M11 9l6 6',
+  camera: 'M4 7h3l2-2h6l2 2h3v12H4zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z',
+  list: 'M3 6h12M3 12h12M3 18h7M17 14l5 3-5 3z'
 };
 const ic = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24"><path d="${P[n]}"/></svg>`;
 
@@ -63,7 +65,7 @@ function confirmSheet(title, text, okLabel = 'Delete') {
 }
 
 /* ───────── app state ───────── */
-const S = { unlocked: false, tab: 'videos', sort: 'new', q: '', liked: false, album: 'All', autoplay: false, picking: false };
+const S = { unlocked: false, tab: 'videos', sort: 'new', q: '', liked: false, album: 'All', autoplay: false, picking: false, playlist: null, gifOnly: false };
 let renderToken = 0;
 let viewer = null; // { el, type, cleanup }
 
@@ -168,7 +170,7 @@ function lockNow() {
   closeViewer();
   document.querySelectorAll('.scrim').forEach((s) => s.remove());
   Vault.clearUrlCache();
-  S.q = ''; S.liked = false; S.album = 'All';
+  S.q = ''; S.liked = false; S.album = 'All'; S.playlist = null; S.gifOnly = false;
   showLock();
 }
 
@@ -191,7 +193,10 @@ function buildShell() {
   $('#q').addEventListener('input', (e) => { S.q = e.target.value.toLowerCase(); render(); });
   root.onclick = (e) => {
     const tab = e.target.closest('[data-tab]');
-    if (tab) { S.tab = tab.dataset.tab; render(); return; }
+    if (tab) {
+      if (tab.dataset.tab === 'videos' && S.tab === 'videos') S.playlist = null; // tap Videos again = back to playlists
+      S.tab = tab.dataset.tab; render(); return;
+    }
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (act === 'lock') lockNow();
     else if (act === 'add') openAdd();
@@ -204,6 +209,8 @@ function visibleItems() {
   if (S.q) list = list.filter((i) => i.title.toLowerCase().includes(S.q) || i.description.toLowerCase().includes(S.q) || i.album.toLowerCase().includes(S.q));
   if (S.liked) list = list.filter((i) => i.liked);
   if (type === 'photo' && S.album !== 'All') list = list.filter((i) => i.album === S.album);
+  if (type === 'photo' && S.gifOnly) list = list.filter((i) => i.gif);
+  if (type === 'video' && S.playlist && !S.q && !S.liked) list = list.filter((i) => i.album === S.playlist);
   if (S.sort === 'size') list.sort((a, b) => b.size - a.size);
   else if (S.sort === 'alpha') list.sort((a, b) => a.title.localeCompare(b.title));
   else list.sort((a, b) => b.addedAt - a.addedAt);
@@ -218,6 +225,8 @@ async function render() {
   $('#fab').style.display = S.tab === 'settings' ? 'none' : 'flex';
   const el = $('#content');
   if (S.tab === 'settings') return renderSettings(el);
+  if (S.playlist && !Vault.all().some((i) => i.type === 'video' && i.album === S.playlist)) S.playlist = null;
+  if (S.tab === 'videos' && !S.playlist && !S.q && !S.liked) return renderPlaylists(el, token);
 
   const list = visibleItems();
   const thumbs = await Promise.all(list.map((i) => Vault.thumbUrl(i).catch(() => null)));
@@ -225,10 +234,12 @@ async function render() {
 
   const albums = Vault.albums();
   if (!albums.includes(S.album)) S.album = 'All';
-  const filters = `
+  const inPl = S.tab === 'videos' && S.playlist && !S.q && !S.liked;
+  const plHead = inPl ? `<div class="plhead"><button class="icon-btn" data-plback>${ic('back')}</button><div class="t"><h2>${esc(S.playlist)}</h2><p>${list.length} video${list.length === 1 ? '' : 's'}</p></div><button class="icon-btn" data-plrename>${ic('edit')}</button></div>` : '';
+  const filters = plHead + `
     <div class="filters">
       ${[['new', 'Latest'], ['size', 'Largest'], ['alpha', 'A–Z']].map(([k, l]) => `<button class="chip ${S.sort === k ? 'on' : ''}" data-sort="${k}">${l}</button>`).join('')}
-      <span class="sp"></span>
+      <span class="sp"></span>${S.tab === 'photos' ? `<button class="chip ${S.gifOnly ? 'on' : ''}" data-gif>GIF</button>` : ''}
       <button class="chip heart ${S.liked ? 'on' : ''}" data-liked>${ic('heart')}Liked</button>
     </div>
     ${S.tab === 'photos' && albums.length > 1 ? `<div class="filters">${albums.map((a) => `<button class="chip ${S.album === a ? 'on' : ''}" data-album="${esc(a)}">${esc(a)}</button>`).join('')}</div>` : ''}`;
@@ -247,7 +258,7 @@ async function render() {
           ${v.progress && v.duration ? `<div class="wbar" style="width:${Math.round((v.progress / v.duration) * 100)}%"></div>` : ''}
         </div>
         <div class="vmeta">
-          <div class="t"><h3>${esc(v.title)}</h3><p>${fmtSize(v.size)}</p></div>
+          <div class="t"><h3>${esc(v.title)}</h3><p>${esc(v.album)} · ${fmtSize(v.size)}</p></div>
           <button class="heart-btn ${v.liked ? 'on' : ''}" data-like="${v.id}">${ic('heart')}</button>
         </div>
       </div>`).join('')}</div>`;
@@ -255,7 +266,7 @@ async function render() {
     body = `<div class="pgrid">${list.map((p, i) => `
       <div class="pcard" data-open="${p.id}">
         ${thumbs[i] ? `<img src="${thumbs[i]}" loading="lazy">` : `<div class="ph" style="height:120px">${ic('image')}</div>`}
-        <span class="alb">${esc(p.album)}</span>
+        <span class="alb">${esc(p.album)}</span>${p.gif ? '<span class="gifb">GIF</span>' : ''}
         ${p.liked ? `<span class="lk">${ic('heart')}</span>` : ''}
       </div>`).join('')}</div>`;
   }
@@ -264,11 +275,54 @@ async function render() {
   el.onclick = async (e) => {
     const s = e.target.closest('[data-sort]'); if (s) { S.sort = s.dataset.sort; return render(); }
     if (e.target.closest('[data-liked]')) { S.liked = !S.liked; return render(); }
+    if (e.target.closest('[data-gif]')) { S.gifOnly = !S.gifOnly; return render(); }
+    if (e.target.closest('[data-plback]')) { S.playlist = null; return render(); }
+    if (e.target.closest('[data-plrename]')) return renamePlaylist(S.playlist);
     const a = e.target.closest('[data-album]'); if (a) { S.album = a.dataset.album; return render(); }
     const lk = e.target.closest('[data-like]');
     if (lk) { e.stopPropagation(); const on = await Vault.toggleLike(lk.dataset.like); lk.classList.toggle('on', on); if (S.liked) render(); return; }
     const o = e.target.closest('[data-open]');
     if (o) openViewer(o.dataset.open, list.map((i) => i.id));
+  };
+}
+
+/* ───────── playlists ───────── */
+async function renderPlaylists(el, token) {
+  const pls = Vault.playlists();
+  const covers = await Promise.all(pls.map((p) => {
+    const c = p.items.find((i) => i.thumb) || p.items[0];
+    return c ? Vault.thumbUrl(c).catch(() => null) : null;
+  }));
+  if (token !== renderToken) return;
+  if (!pls.length) {
+    el.innerHTML = `<div class="empty">${ic('list')}<h3>No playlists yet</h3><p>Tap + to import videos and give them a playlist name.</p></div>`;
+    el.onclick = null;
+    return;
+  }
+  el.innerHTML = `<div class="plgrid">${pls.map((p, i) => `
+    <div class="plcard" data-pl="${esc(p.name)}">
+      <div class="stack"><div class="th">
+        ${covers[i] ? `<img src="${covers[i]}" loading="lazy">` : `<div class="ph">${ic('video')}</div>`}
+        <span class="cnt">${ic('list')}${p.count}</span>
+      </div></div>
+      <h3>${esc(p.name)}</h3>
+      <p>${p.count} video${p.count === 1 ? '' : 's'} · ${fmtSize(p.bytes)}</p>
+    </div>`).join('')}</div>`;
+  el.onclick = (e) => {
+    const c = e.target.closest('[data-pl]');
+    if (c) { S.playlist = c.dataset.pl; render(); window.scrollTo(0, 0); }
+  };
+}
+
+function renamePlaylist(name) {
+  const s = sheet(`<h2>Rename playlist</h2>
+    <input type="text" id="rn" maxlength="60" value="${esc(name)}">
+    <button class="btn" id="go">Save</button>`);
+  $('#go', s).onclick = async () => {
+    const to = $('#rn', s).value.trim();
+    if (!to) return toast('Name cannot be empty', 'error');
+    await Vault.renameAlbum('video', name, to);
+    S.playlist = to; s._close(); toast('Renamed'); render();
   };
 }
 
@@ -329,7 +383,8 @@ function openAdd() {
   const s = sheet(`<h2>Add to vault</h2>
     <label class="dropzone" for="pick"><b>Choose photos & videos</b>They are copied into the private vault.</label>
     <input type="file" id="pick" multiple accept="image/*,video/*" style="display:none">
-    <input type="text" id="alb" placeholder="Album (photos) e.g. Family" value="General">
+    <input type="text" id="alb" list="albnames" maxlength="60" placeholder="Playlist (videos) or Album (photos)" value="${esc(S.tab === 'videos' ? (S.playlist || 'General') : (S.album !== 'All' ? S.album : 'General'))}">
+    <datalist id="albnames">${[...new Set(Vault.all().map((i) => i.album))].map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
     <button class="btn" id="go" disabled>Import</button>
     <div class="prog" id="prog" style="display:none"><span id="pst"></span><div class="bg"><div class="fl" id="pfl"></div></div></div>`);
   let files = [];
@@ -339,7 +394,7 @@ function openAdd() {
   pick.addEventListener('click', () => { S.picking = true; });
   window.addEventListener('focus', () => setTimeout(() => { S.picking = false; }, 1500), { once: true });
   pick.addEventListener('change', () => {
-    files = [...pick.files].filter((f) => /^(image|video)\//.test(f.type));
+    files = [...pick.files].filter((f) => /^(image|video)\//.test(f.type) || /\.gif$/i.test(f.name));
     S.picking = false;
     $('.dropzone b', s).textContent = files.length ? `${files.length} file${files.length > 1 ? 's' : ''} selected` : 'Choose photos & videos';
     $('#go', s).disabled = !files.length;
@@ -387,6 +442,7 @@ async function openViewer(id, ids) {
     <div class="vbar">
       <button data-close>${ic('back')}</button><div class="ttl">${esc(it.title)}</div>
       <button data-like class="${it.liked ? 'on' : ''}">${ic('heart')}</button>
+      ${it.type === 'video' ? `<button data-thumb aria-label="Choose thumbnail">${ic('camera')}</button>` : ''}
       <button data-edit>${ic('edit')}</button>
       <button data-del class="danger">${ic('trash')}</button>
     </div>`;
@@ -395,6 +451,7 @@ async function openViewer(id, ids) {
     el.onclick = async (e) => {
       if (e.target.closest('[data-close]')) return closeViewer();
       if (e.target.closest('[data-like]')) { const on = await Vault.toggleLike(it.id); $('[data-like]', el).classList.toggle('on', on); return; }
+      if (e.target.closest('[data-thumb]')) return pickThumb(it);
       if (e.target.closest('[data-edit]')) return editItem(it, () => openViewer(it.id, ids));
       if (e.target.closest('[data-del]')) {
         if (await confirmSheet('Delete forever?', `"${it.title}" will be permanently removed from the vault.`)) {
@@ -460,17 +517,89 @@ async function openViewer(id, ids) {
   });
 }
 
+/* ───────── video thumbnail picker ───────── */
+function imgToBlob(file) {
+  return new Promise((resolve, reject) => {
+    const u = URL.createObjectURL(file);
+    const im = new Image();
+    im.onload = () => {
+      const k = Math.min(1, 640 / Math.max(im.naturalWidth, im.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(im.naturalWidth * k));
+      c.height = Math.max(1, Math.round(im.naturalHeight * k));
+      c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(u);
+      c.toBlob((b) => (b ? resolve(b) : reject(new Error('encode failed'))), 'image/jpeg', 0.85);
+    };
+    im.onerror = () => { URL.revokeObjectURL(u); reject(new Error('bad image')); };
+    im.src = u;
+  });
+}
+
+async function pickThumb(it) {
+  const vp = $('#vp');
+  const start = vp ? vp.currentTime : 0; // start where you paused the video
+  vp?.pause();
+  const url = await Vault.mediaUrl(it);
+  let tv;
+  const s = sheet(`<h2>Choose thumbnail</h2>
+    <video id="tv" src="${url}" muted playsinline preload="auto" style="width:100%;border-radius:14px;background:#000;max-height:34vh"></video>
+    <input type="range" id="ts" min="0" max="1000" value="0" style="width:100%;margin:14px 0 4px;accent-color:#ff7eb9">
+    <div class="tm"><span id="tc">0:00</span><span id="td">0:00</span></div>
+    <button class="btn" id="use">Use this frame</button>
+    <label class="btn alt" for="timg" style="display:block;text-align:center">Upload an image instead</label>
+    <input type="file" id="timg" accept="image/*" style="display:none">`,
+  { onClose: () => { if (tv) { tv.pause(); tv.removeAttribute('src'); tv.load(); } } });
+
+  tv = $('#tv', s);
+  const slider = $('#ts', s);
+  const label = () => { $('#tc', s).textContent = fmtDur(tv.currentTime) || '0:00'; };
+  tv.addEventListener('loadedmetadata', () => {
+    $('#td', s).textContent = fmtDur(tv.duration) || '0:00';
+    const t0 = Math.max(0, Math.min(start, (tv.duration || 1) - 0.1));
+    tv.currentTime = t0;
+    slider.value = tv.duration ? Math.round((t0 / tv.duration) * 1000) : 0;
+  }, { once: true });
+  tv.addEventListener('seeked', label);
+  tv.addEventListener('error', () => toast('Could not load video', 'error'));
+  slider.addEventListener('input', () => { if (tv.duration) tv.currentTime = (slider.value / 1000) * tv.duration; });
+
+  $('#use', s).onclick = async () => {
+    const w = tv.videoWidth, h = tv.videoHeight;
+    if (!w || !h) return toast('Video not ready yet', 'error');
+    const k = Math.min(1, 640 / Math.max(w, h));
+    const c = document.createElement('canvas');
+    c.width = Math.round(w * k); c.height = Math.round(h * k);
+    c.getContext('2d').drawImage(tv, 0, 0, c.width, c.height);
+    const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.85));
+    if (!blob) return toast('Could not capture frame', 'error');
+    await Vault.setThumb(it.id, blob);
+    s._close(); toast('Thumbnail updated');
+  };
+
+  const timg = $('#timg', s);
+  timg.addEventListener('click', () => { S.picking = true; });
+  window.addEventListener('focus', () => setTimeout(() => { S.picking = false; }, 1500), { once: true });
+  timg.addEventListener('change', async () => {
+    S.picking = false;
+    const f = timg.files[0];
+    if (!f) return;
+    try { await Vault.setThumb(it.id, await imgToBlob(f)); s._close(); toast('Thumbnail updated'); }
+    catch { toast('Could not use that image', 'error'); }
+  });
+}
+
 function editItem(it, done) {
   const s = sheet(`<h2>Edit</h2>
     <input type="text" id="et" placeholder="Title" value="${esc(it.title)}">
     <textarea id="ed" rows="3" placeholder="Description…">${esc(it.description)}</textarea>
-    ${it.type === 'photo' ? `<input type="text" id="ea" placeholder="Album" value="${esc(it.album)}">` : ''}
+    <input type="text" id="ea" maxlength="60" placeholder="${it.type === 'video' ? 'Playlist' : 'Album'}" value="${esc(it.album)}">
     <button class="btn" id="go">Save changes</button>`);
   $('#go', s).onclick = async () => {
     await Vault.update(it.id, {
       title: $('#et', s).value.trim() || it.title,
       description: $('#ed', s).value.trim(),
-      ...(it.type === 'photo' ? { album: $('#ea', s).value.trim() || 'General' } : {})
+      album: $('#ea', s).value.trim() || 'General'
     });
     s._close(); toast('Saved'); done?.();
   };
@@ -485,6 +614,7 @@ CapApp.addListener('backButton', () => {
   const scrim = [...document.querySelectorAll('.scrim')].pop();
   if (scrim) return scrim._close?.();
   if (viewer) return closeViewer();
+  if (S.unlocked && S.tab === 'videos' && S.playlist) { S.playlist = null; return render(); }
   if (S.unlocked && S.tab !== 'videos') { S.tab = 'videos'; return render(); }
   CapApp.minimizeApp();
 });
