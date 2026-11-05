@@ -87,10 +87,12 @@ function makeThumb(file, isVideo) {
 export async function add(file, { title, album, onProgress } = {}) {
   const id = crypto.randomUUID();
   const isVideo = file.type.startsWith('video/');
-  const ext = ((file.name.split('.').pop() || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 5)) || (isVideo ? 'mp4' : 'jpg');
+  const isGif = !isVideo && (file.type === 'image/gif' || /\.gif$/i.test(file.name));
+  const ext = ((file.name.split('.').pop() || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 5)) || (isVideo ? 'mp4' : isGif ? 'gif' : 'jpg');
   const path = `${ROOT}/media/${id}.${ext}`;
 
-  const info = await makeThumb(file, isVideo);
+  // GIFs keep no static thumbnail: the grid plays the real animated file.
+  const info = isGif ? { blob: null, duration: 0 } : await makeThumb(file, isVideo);
   await writeChunked(file, path, onProgress);
 
   let thumb = null;
@@ -103,7 +105,8 @@ export async function add(file, { title, album, onProgress } = {}) {
     id, type: isVideo ? 'video' : 'photo',
     title: title || file.name.replace(/\.[^.]+$/, '') || 'Untitled',
     description: '', album: album || 'General',
-    path, thumb, size: file.size, mime: file.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
+    gif: isGif, path, thumb, size: file.size,
+    mime: isGif ? 'image/gif' : file.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
     duration: info.duration, addedAt: Date.now(), liked: false, progress: 0
   };
   meta.items.unshift(item);
@@ -164,7 +167,10 @@ async function urlFor(path, mime) {
 }
 
 export const mediaUrl = (it) => urlFor(it.path, it.mime);
-export const thumbUrl = (it) => (it.thumb ? urlFor(it.thumb, 'image/jpeg') : Promise.resolve(null));
+export const thumbUrl = (it) => {
+  if (it.gif) return mediaUrl(it); // animated preview
+  return it.thumb ? urlFor(it.thumb, 'image/jpeg') : Promise.resolve(null);
+};
 
 function revoke(id) {
   const it = get(id);
@@ -191,3 +197,38 @@ export function stats() {
 }
 
 export const albums = () => ['All', ...new Set(meta.items.filter((i) => i.type === 'photo').map((i) => i.album))];
+
+/* Videos use the `album` field as their playlist name. */
+export function playlists() {
+  const m = new Map();
+  for (const i of meta.items) {
+    if (i.type !== 'video') continue;
+    const n = i.album || 'General';
+    if (!m.has(n)) m.set(n, { name: n, count: 0, bytes: 0, items: [], last: 0 });
+    const p = m.get(n);
+    p.count++; p.bytes += i.size; p.items.push(i); p.last = Math.max(p.last, i.addedAt);
+  }
+  return [...m.values()].sort((a, b) => b.last - a.last);
+}
+
+export async function renameAlbum(type, from, to) {
+  meta.items.forEach((i) => { if (i.type === type && i.album === from) i.album = to; });
+  await save();
+}
+
+/* Replace a video's thumbnail with a new JPEG blob (new filename each time so nothing is cached). */
+export async function setThumb(id, blob) {
+  const it = get(id);
+  if (!it) return;
+  const path = `${ROOT}/thumbs/${id}-${Date.now()}.jpg`;
+  await Filesystem.writeFile({ path, directory: D, data: await blobToB64(blob), recursive: true });
+  const old = it.thumb;
+  it.thumb = path;
+  await save();
+  if (old) {
+    const u = urlCache.get(old);
+    if (u?.startsWith('blob:')) URL.revokeObjectURL(u);
+    urlCache.delete(old);
+    try { await Filesystem.deleteFile({ path: old, directory: D }); } catch { /* already gone */ }
+  }
+}
